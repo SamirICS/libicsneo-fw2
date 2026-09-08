@@ -81,6 +81,14 @@ bool Communication::sendPacket(std::vector<uint8_t>& bytes) {
 	return rawWrite(bytes);
 }
 
+bool Communication::sendMessage(const std::shared_ptr<Frame>& frame) {
+	std::vector<uint8_t> packet;
+	if(!encoder->encode(*packetizer, packet, frame))
+		return false;
+
+	return sendPacket(packet);
+}
+
 bool Communication::sendCommand(Command cmd, std::vector<uint8_t> arguments) {
 	std::vector<uint8_t> packet;
 	if(!encoder->encode(*packetizer, packet, cmd, arguments))

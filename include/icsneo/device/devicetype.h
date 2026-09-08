@@ -84,7 +84,13 @@ public:
 		RADGalaxy = (0x10000000),
 		RADStar2 = (0x20000000),
 		VividCAN = (0x40000000),
-		OBD2_SIM = (0x80000000)
+		OBD2_SIM = (0x80000000),
+
+		// NOT an Intrepid allocation. FreeWili 2 is third-party hardware supported by the
+		// libicsneo-fw2 fork; 0x0F000001 sits in neither the sequential low range (now at
+		// 0x2C) nor the legacy powers-of-two, so it cannot collide with an ICS device.
+		// If ICS ever assigns a real value, change it here and in the define below.
+		FreeWili2 = (0x0F000001)
 	};
 
 	/**
@@ -199,6 +205,8 @@ public:
 				return "VividCAN";
 			case OBD2_SIM:
 				return "neoOBD2 SIM";
+			case FreeWili2:
+				return "FreeWili 2";
 			case FIRE3_FlexRay:
 				return "neoVI FIRE3 FlexRay";
 			case FIRE3_T1S_LIN:
@@ -301,6 +309,8 @@ private:
 #define ICSNEO_DEVICETYPE_RADSTAR2 ((devicetype_t)0x20000000)
 #define ICSNEO_DEVICETYPE_VIVIDCAN ((devicetype_t)0x40000000)
 #define ICSNEO_DEVICETYPE_OBD2_SIM ((devicetype_t)0x80000000)
+// Not an Intrepid allocation -- see DeviceType::FreeWili2 above.
+#define ICSNEO_DEVICETYPE_FREEWILI2 ((devicetype_t)0x0F000001)
 #endif
 
 #endif
