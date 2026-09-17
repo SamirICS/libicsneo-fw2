@@ -3,6 +3,9 @@
 
 #ifdef __cplusplus
 
+#include <chrono>
+#include <thread>
+
 #include "icsneo/device/device.h"
 #include "icsneo/device/devicetype.h"
 #include "icsneo/device/extensions/deviceextension.h"
@@ -123,8 +126,13 @@ protected:
 	 *
 	 * What it does still do is prove the board is actually talking, which matters
 	 * -- an FW2 whose ports enumerate but whose firmware is wedged should fail
-	 * open() rather than appear healthy. So this issues a real `i\g\u`
-	 * (gpio_read_all) round trip and fails if it does not come back.
+	 * open() rather than appear healthy. So this issues a real `h\t` (read the
+	 * board RTC) round trip and fails if it does not come back.
+	 *
+	 * `h\t` rather than `i\g\u`: measured on hardware, `i\g\u` returns
+	 * EPOWERZONE unless power zone 6 (FPGA) is up, and that rail is off by
+	 * default and unrelated to CAN, so probing with it fails a perfectly
+	 * healthy board. See FW2Communication::answerStatusRequest().
 	 */
 	APIEvent::Type attemptToBeginCommunication() override {
 		auto fw2 = std::dynamic_pointer_cast<FW2Communication>(com);
@@ -132,7 +140,7 @@ protected:
 			return APIEvent::Type::NoDeviceResponse;
 
 		std::string response;
-		if(!fw2->callOneWili("i\\g\\u", response, std::chrono::milliseconds(1000))) {
+		if(!fw2->callOneWili("h\\t", response, std::chrono::milliseconds(1000))) {
 			// Not getCommunicationNotEstablishedError(): that resolves to a
 			// NoSerialNumber* variant, which would be actively misleading here.
 			// We have the serial -- from the USB descriptor -- and the board is
@@ -158,12 +166,57 @@ protected:
 		if(!fw2)
 			return false;
 
+		// The transceiver has to be powered before the stream is worth starting.
+		// Only on the way up: dropping the rail on goOffline() would be a
+		// surprising side effect for a caller that just wants to stop receiving.
+		if(enable && !raiseCANPowerZone(fw2))
+			return false;
+
 		std::string command = "i\\c\\o ";
 		command += std::to_string(static_cast<int>(CAN_CHANNEL));
 		command += enable ? " 1" : " 0";
 
 		std::string response;
-		return fw2->callOneWili(command, response, std::chrono::milliseconds(1000));
+		if(!fw2->callOneWili(command, response, std::chrono::milliseconds(1000)))
+			return false;
+
+		// Bus-state polling follows the stream. FW2 emits no error event, so
+		// without this an application sees silence from an idle bus and silence
+		// from a bus-off controller and cannot tell them apart. Started after the
+		// stream rather than before so the first poll reflects a controller that
+		// is already meant to be receiving.
+		fw2->setBusStatePolling(enable);
+		return true;
+	}
+
+private:
+	/**
+	 * Bring up the CAN power rail, zone 15 (5V_S15).
+	 *
+	 * That rail feeds the MCP2518FD controller and the TCAN1472 transceiver,
+	 * and it is *off on a freshly booted board* -- measured on hardware via
+	 * `h\p\g`, not inferred. Until it is raised every CAN operation fails, which
+	 * is the first of the bring-up steps FW2_PORT.md warns "fail silently".
+	 *
+	 * The board serialises zone changes and answers "a zone change is still
+	 * being confirmed - try again in a moment" while one is settling, so a
+	 * single refusal is not fatal and this retries within a bounded window.
+	 * Raising a rail that is already up is accepted by the firmware, so there is
+	 * no need to read the current state first.
+	 */
+	bool raiseCANPowerZone(const std::shared_ptr<FW2Communication>& fw2) {
+		static constexpr int CAN_POWER_ZONE = 15;
+		const std::string command = "h\\p\\s " + std::to_string(CAN_POWER_ZONE) + " 1";
+
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+		for(;;) {
+			std::string response;
+			if(fw2->callOneWili(command, response, std::chrono::milliseconds(1000)))
+				return true;
+			if(std::chrono::steady_clock::now() >= deadline)
+				return false;
+			std::this_thread::sleep_for(std::chrono::milliseconds(250));
+		}
 	}
 };
 

@@ -1,5 +1,6 @@
 #include "icsneo/communication/fw2communication.h"
 #include "icsneo/communication/message/canmessage.h"
+#include "icsneo/communication/message/canerrormessage.h"
 #include "icsneo/communication/message/resetstatusmessage.h"
 #include "icsneo/communication/command.h"
 #include "icsneo/communication/network.h"
@@ -11,6 +12,7 @@
 #include <array>
 #include <cstdio>
 #include <optional>
+#include <sstream>
 #include <vector>
 
 using namespace icsneo;
@@ -102,6 +104,128 @@ bool isResponseFrame(const std::string& line) {
 	return line[1] != '*';
 }
 
+/**
+ * True if a OneWili response frame reports success.
+ *
+ * A frame is "[<path> <id> <seq> <body...> <ok>]" and the status is the last
+ * space-separated token before the closing bracket: "1" succeeded, "0" failed.
+ * This mirrors ow__parse_frame() in the vendored client
+ * (third-party/onewili/src/onewili.c:78), which is the only definition of the
+ * protocol we have.
+ *
+ * Deliberately not a search for the word "ok". Measured against real firmware,
+ * that is wrong in both directions: "Ok" appears inside the *payload* of some
+ * successful frames (h\p\g prints it as text) and is absent from others that
+ * also succeeded (h\t returns bare numbers, "[h\t ... 09 46 46 1]").
+ */
+bool frameReportsSuccess(const std::string& line) {
+	if(line.size() < 5 || line.front() != '[' || line.back() != ']')
+		return false;
+	const auto lastSpace = line.rfind(' ', line.size() - 2);
+	if(lastSpace == std::string::npos)
+		return false;
+	return line[lastSpace + 1] == '1';
+}
+
+/*
+ * MCP2518FD SFR offsets used for bus state. From the datasheet memory map; the
+ * CAN SFR block starts at 0x000 in the controller's address space.
+ */
+constexpr uint32_t REG_C1TREC = 0x01C;   // TEC / REC and the error-state flags
+constexpr uint32_t REG_BUS_STATE_WORDS = 3; // C1TREC, C1BDIAG0, C1BDIAG1
+
+// C1TREC
+constexpr uint32_t TREC_REC_MASK = 0x000000FFu; // bits 0-7
+constexpr uint32_t TREC_TEC_SHIFT = 8;
+constexpr uint32_t TREC_TEC_MASK = 0x000000FFu; // bits 8-15
+constexpr uint32_t TREC_EWARN = 1u << 16;
+constexpr uint32_t TREC_RXBP = 1u << 19; // Receiver bus passive
+constexpr uint32_t TREC_TXBP = 1u << 20; // Transmitter bus passive
+constexpr uint32_t TREC_TXBO = 1u << 21; // Transmitter bus off
+
+// C1BDIAG1 -- nominal-phase error latches
+constexpr uint32_t BDIAG1_NBIT0ERR = 1u << 16;
+constexpr uint32_t BDIAG1_NBIT1ERR = 1u << 17;
+constexpr uint32_t BDIAG1_NACKERR = 1u << 18;
+constexpr uint32_t BDIAG1_NFORMERR = 1u << 19;
+constexpr uint32_t BDIAG1_NSTUFERR = 1u << 20;
+constexpr uint32_t BDIAG1_NCRCERR = 1u << 21;
+// C1BDIAG1 -- data-phase error latches
+constexpr uint32_t BDIAG1_DBIT0ERR = 1u << 24;
+constexpr uint32_t BDIAG1_DBIT1ERR = 1u << 25;
+constexpr uint32_t BDIAG1_DFORMERR = 1u << 27;
+constexpr uint32_t BDIAG1_DSTUFERR = 1u << 28;
+constexpr uint32_t BDIAG1_DCRCERR = 1u << 29;
+
+/** Every C1BDIAG1 bit we translate; used to ignore EFMSGCNT churn. */
+constexpr uint32_t BDIAG1_ERROR_BITS =
+	BDIAG1_NBIT0ERR | BDIAG1_NBIT1ERR | BDIAG1_NACKERR | BDIAG1_NFORMERR |
+	BDIAG1_NSTUFERR | BDIAG1_NCRCERR | BDIAG1_DBIT0ERR | BDIAG1_DBIT1ERR |
+	BDIAG1_DFORMERR | BDIAG1_DSTUFERR | BDIAG1_DCRCERR;
+
+/**
+ * Collapse a set of C1BDIAG1 error latches into libicsneo's single CANErrorCode.
+ *
+ * The register latches every error type independently and libicsneo carries one
+ * code per phase, so this has to choose. The order below is diagnostic value,
+ * not datasheet order: on a miswired or unterminated bus an ACK error is the
+ * thing that is actually wrong, and reporting a stuff error instead -- true, but
+ * a downstream consequence -- sends the reader after the wrong fault.
+ */
+CANErrorCode worstErrorCode(uint32_t bdiag1, bool dataPhase) {
+	if(dataPhase) {
+		if(bdiag1 & BDIAG1_DCRCERR) return CANErrorCode::CRCError;
+		if(bdiag1 & BDIAG1_DFORMERR) return CANErrorCode::FormError;
+		if(bdiag1 & BDIAG1_DSTUFERR) return CANErrorCode::StuffError;
+		if(bdiag1 & BDIAG1_DBIT1ERR) return CANErrorCode::Bit1Error;
+		if(bdiag1 & BDIAG1_DBIT0ERR) return CANErrorCode::Bit0Error;
+		return CANErrorCode::NoError;
+	}
+	if(bdiag1 & BDIAG1_NACKERR) return CANErrorCode::AckError;
+	if(bdiag1 & BDIAG1_NCRCERR) return CANErrorCode::CRCError;
+	if(bdiag1 & BDIAG1_NFORMERR) return CANErrorCode::FormError;
+	if(bdiag1 & BDIAG1_NSTUFERR) return CANErrorCode::StuffError;
+	if(bdiag1 & BDIAG1_NBIT1ERR) return CANErrorCode::Bit1Error;
+	if(bdiag1 & BDIAG1_NBIT0ERR) return CANErrorCode::Bit0Error;
+	return CANErrorCode::NoError;
+}
+
+/**
+ * Pull `count` register words out of an `i\c\r` response frame.
+ *
+ * The frame is "[<path> <id> <seq> <body...> <ok>]" and the body is where the
+ * register words live, but the exact number of leading metadata tokens is not
+ * something this port can pin down from the vendored client -- it calls
+ * ow__rest_str() and hands the whole remainder back to its caller.
+ *
+ * So rather than counting tokens, this takes every token that is exactly eight
+ * hex digits and keeps the LAST `count` of them. Eight digits is the width
+ * ow__cat_hex() uses for register data, and taking from the end skips any
+ * id/seq that happens to look the same. Fewer than `count` matches means the
+ * firmware did not return register data, which the caller must treat as a
+ * failure rather than as zeroes.
+ */
+bool parseRegisterWords(const std::string& frame, size_t count, std::vector<uint32_t>& out) {
+	if(frame.size() < 2 || frame.front() != '[' || frame.back() != ']')
+		return false;
+
+	std::vector<uint32_t> words;
+	std::istringstream tokens(frame.substr(1, frame.size() - 2));
+	std::string token;
+	while(tokens >> token) {
+		if(token.size() != 8)
+			continue;
+		if(token.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos)
+			continue;
+		words.push_back(static_cast<uint32_t>(std::stoul(token, nullptr, 16)));
+	}
+
+	if(words.size() < count)
+		return false;
+	out.assign(words.end() - static_cast<std::ptrdiff_t>(count), words.end());
+	return true;
+}
+
 } // namespace
 
 /** Wraps the vendored C parser so its 4 KB buffer stays out of the header. */
@@ -131,6 +255,8 @@ void FW2Communication::spawnThreads() {
 	// Deliberately NOT Communication::spawnThreads(): readTask() would feed the
 	// stream to a Packetizer expecting ICS framing, which FW2 never produces.
 	rxThread = std::thread(&FW2Communication::rxTask, this);
+	statusThread = std::thread(&FW2Communication::statusTask, this);
+	busStateThread = std::thread(&FW2Communication::busStateTask, this);
 }
 
 void FW2Communication::joinThreads() {
@@ -154,6 +280,168 @@ void FW2Communication::joinThreads() {
 		syncResponse.clear();
 	}
 	syncCv.notify_all();
+
+	// Joined last, and only after the two releases above: a probe that was in
+	// flight when close() was called is waiting on syncCv for a response that
+	// rxTask() -- already joined -- can no longer deliver. Both of these threads
+	// make synchronous calls, so both are in that position.
+	statusCv.notify_all();
+	if(statusThread.joinable())
+		statusThread.join();
+
+	busStateCv.notify_all();
+	if(busStateThread.joinable())
+		busStateThread.join();
+}
+
+void FW2Communication::statusTask() {
+	EventManager::GetInstance().downgradeErrorsOnCurrentThread();
+
+	while(!closing) {
+		{
+			std::unique_lock<std::mutex> lk(statusMutex);
+			// The timeout is only a liveness check on `closing`; nothing is due
+			// when it expires.
+			statusCv.wait_for(lk, std::chrono::milliseconds(50),
+				[this]() { return statusRequested || closing; });
+			if(closing)
+				return;
+			if(!statusRequested)
+				continue;
+			statusRequested = false;
+		}
+
+		// Failure is not reported here. answerStatusRequest() simply does not
+		// dispatch, and Device's heartbeat draws the disconnect conclusion from
+		// the silence -- which is the mechanism it already uses for every other
+		// device, and the only one that stays honest if the board is wedged.
+		answerStatusRequest();
+	}
+}
+
+void FW2Communication::setBusStatePolling(bool enable) {
+	{
+		std::scoped_lock<std::mutex> lk(busStateMutex);
+		busStatePolling = enable;
+		if(enable) {
+			// Read immediately on the way up rather than after a full period, so
+			// a board that is already in bus-off says so at goOnline() instead of
+			// looking merely idle for the first half second.
+			busStateDue = true;
+			// A fresh online is a fresh question: re-report the state even if it
+			// is bit-identical to whatever we last saw before going offline.
+			haveLastBusState = false;
+		}
+	}
+	busStateCv.notify_one();
+}
+
+bool FW2Communication::readCANRegisters(uint32_t address, size_t count,
+		std::vector<uint32_t>& out, std::chrono::milliseconds timeout) {
+	if(count == 0)
+		return false;
+
+	// Formatted exactly as ow_io_canfd_read_can_registers() does it: channel as
+	// a decimal int, address as 8 hex digits, word count as a decimal int. The
+	// 8-digit width is not cosmetic -- a bare "0" for the address was measured
+	// to produce a response with no register data at all.
+	char command[32];
+	std::snprintf(command, sizeof(command), "i\\c\\r %d %08X %d",
+		static_cast<int>(channel), address, static_cast<int>(count));
+
+	std::string response;
+	if(!callOneWili(command, response, timeout))
+		return false;
+
+	return parseRegisterWords(response, count, out);
+}
+
+void FW2Communication::busStateTask() {
+	EventManager::GetInstance().downgradeErrorsOnCurrentThread();
+
+	// Slow on purpose. Each poll is a synchronous round trip that serialises
+	// against the TX pipeline and the heartbeat, and bus state is a condition
+	// rather than an event -- a board in bus-off stays in bus-off. Half a second
+	// is well inside human reaction time for someone wiggling a connector, which
+	// is the use this was written for.
+	constexpr auto POLL_PERIOD = std::chrono::milliseconds(500);
+
+	while(!closing) {
+		{
+			std::unique_lock<std::mutex> lk(busStateMutex);
+			busStateCv.wait_for(lk, POLL_PERIOD,
+				[this]() { return closing || busStateDue || !busStatePolling; });
+			if(closing)
+				return;
+			if(!busStatePolling || !busStateSupported)
+				continue;
+			busStateDue = false;
+		}
+
+		std::vector<uint32_t> regs;
+		if(!readCANRegisters(REG_C1TREC, REG_BUS_STATE_WORDS, regs)) {
+			// Two different failures land here and only one is worth giving up
+			// on. A timeout is transient -- the board may simply be busy -- so
+			// keep polling. A success frame carrying no register data means this
+			// firmware does not implement `i\c\r`, and retrying that forever
+			// costs a round trip every period for information that will never
+			// arrive.
+			std::string probe;
+			if(callOneWili("h\\t", probe, std::chrono::milliseconds(250))) {
+				// The board is answering, so the register read itself is what
+				// came back empty.
+				{
+					std::scoped_lock<std::mutex> lk(busStateMutex);
+					busStateSupported = false;
+				}
+				report(APIEvent::Type::NotSupported, APIEvent::Severity::EventWarning);
+			}
+			continue;
+		}
+
+		const uint32_t trec = regs[0];
+		const uint32_t bdiag1 = regs[2];
+
+		// EFMSGCNT in the low half of C1BDIAG1 counts *good* frames and moves
+		// constantly on a live bus, so compare only the error latches. Without
+		// this the change detector fires on every poll and buries the real
+		// transitions.
+		//
+		// Those latches are sticky -- the controller sets them and only a write
+		// clears them -- so they answer "has this ever happened" rather than "is
+		// this happening now". That is deliberate: clearing them would be a
+		// write performed by what is otherwise a read, and it would destroy
+		// evidence for anything else looking at the same controller. TEC and REC
+		// are the live signal, and they are in the same message.
+		const uint32_t errorBits = bdiag1 & BDIAG1_ERROR_BITS;
+		{
+			std::scoped_lock<std::mutex> lk(busStateMutex);
+			if(haveLastBusState && trec == lastTREC && errorBits == (lastBDIAG1 & BDIAG1_ERROR_BITS))
+				continue;
+			haveLastBusState = true;
+			lastTREC = trec;
+			lastBDIAG1 = bdiag1;
+		}
+
+		auto msg = std::make_shared<CANErrorMessage>();
+		msg->network = Network::NetID::DWCAN_01;
+		msg->receiveErrorCount = static_cast<uint8_t>(trec & TREC_REC_MASK);
+		msg->transmitErrorCount = static_cast<uint8_t>((trec >> TREC_TEC_SHIFT) & TREC_TEC_MASK);
+		msg->errorWarn = (trec & TREC_EWARN) != 0;
+		// libicsneo carries one error-passive flag; the MCP2518FD tracks the
+		// receiver and transmitter separately. Either one is error-passive.
+		msg->errorPassive = (trec & (TREC_RXBP | TREC_TXBP)) != 0;
+		msg->busOff = (trec & TREC_TXBO) != 0;
+		msg->errorCode = worstErrorCode(bdiag1, false);
+		msg->dataErrorCode = worstErrorCode(bdiag1, true);
+		// Deliberately left at zero. FW2's timestamps come from canRxReport, and
+		// this message is the product of a host-initiated poll -- there is no
+		// device timestamp for it, and inventing one from the host clock would
+		// put a different time base in the same field.
+		msg->timestamp = 0;
+
+		dispatchMessage(msg);
+	}
 }
 
 void FW2Communication::rxTask() {
@@ -236,6 +524,17 @@ void FW2Communication::drainBinaryFrames() {
 			// CAN FD has no RTR; the bit is RRS there and must not be surfaced.
 			msg->isRemote = !msg->isCANFD && (r1 & R1_RTR) != 0;
 			msg->error = report_.error;
+			if(report_.error) {
+				// The header error bit says this one frame was bad and nothing
+				// about bus state, so ask the poller to look now rather than up
+				// to a period later. The counters it reads are what turn "a bad
+				// frame arrived" into "the bus is degrading".
+				{
+					std::scoped_lock<std::mutex> lk(busStateMutex);
+					busStateDue = true;
+				}
+				busStateCv.notify_one();
+			}
 
 			const uint32_t sid = r0 & R0_SID_MASK;
 			const uint32_t eid = (r0 >> R0_EID_SHIFT) & R0_EID_MASK;
@@ -361,9 +660,7 @@ bool FW2Communication::callOneWili(const std::string& command, std::string& resp
 		return false;
 	}
 	response = syncResponse;
-	// A frame ends in "ok" when the command succeeded; the firmware says so
-	// explicitly rather than by omission.
-	return response.find(" ok]") != std::string::npos;
+	return frameReportsSuccess(response);
 }
 
 bool FW2Communication::sendMessage(const std::shared_ptr<Frame>& frame) {
@@ -412,8 +709,21 @@ bool FW2Communication::sendMessage(const std::shared_ptr<Frame>& frame) {
 bool FW2Communication::sendCommand(Command cmd, std::vector<uint8_t> arguments) {
 	(void)arguments;
 
-	if(cmd == Command::RequestStatusUpdate)
-		return answerStatusRequest();
+	if(cmd == Command::RequestStatusUpdate) {
+		// Hand off rather than answer here. The caller is Device's heartbeat
+		// thread holding a mutex our dispatch would re-enter; see statusTask().
+		{
+			std::scoped_lock<std::mutex> lk(statusMutex);
+			if(closing)
+				return false;
+			statusRequested = true;
+		}
+		statusCv.notify_one();
+		// True means "the request was accepted", exactly as it does for an ICS
+		// device whose write succeeded. Whether the board is alive is answered
+		// by the status message arriving, not by this return value.
+		return true;
+	}
 
 	// Every other Command in libicsneo's vocabulary is an ICS packet-protocol
 	// command with no OneWili equivalent. Report rather than silently succeed:
@@ -425,11 +735,17 @@ bool FW2Communication::sendCommand(Command cmd, std::vector<uint8_t> arguments) 
 
 bool FW2Communication::answerStatusRequest() {
 	// Device's heartbeat closes the device if nothing answers within 3.5 s, so
-	// this has to be both prompt and truthful. `i\g\u` (gpio_read_all) is a
-	// cheap round trip that fails exactly when the USB bridge is gone -- which
-	// makes libicsneo's disconnect detection mean something real on FW2.
+	// this has to be both prompt and truthful.
+	//
+	// `h\t` (read the board RTC) rather than `i\g\u` (gpio_read_all): measured
+	// on real hardware, `i\g\u` fails with EPOWERZONE unless power zone 6
+	// (FPGA, 3V3_S6) is up, and that rail is off by default and has nothing to
+	// do with CAN. A liveness probe that depends on an unrelated optional rail
+	// reports a healthy board as dead. `h\t` is served by the board manager, is
+	// always available, and at ~47 bytes is cheaper on the Full-Speed text
+	// endpoint than the ~700-byte `h\p\g` alternative.
 	std::string response;
-	if(!callOneWili("i\\g\\u", response, std::chrono::milliseconds(250)))
+	if(!callOneWili("h\\t", response, std::chrono::milliseconds(250)))
 		return false;
 
 	auto status = std::make_shared<ResetStatusMessage>();

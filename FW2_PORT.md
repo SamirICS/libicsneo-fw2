@@ -386,11 +386,50 @@ a settings mapping, or one message type. Answer them as we hit them.
 3. **Does `ow_io_canfd_setup_filter` cover what libicsneo apps expect,** or do we
    filter in software? *Phase 2. Software filtering is an acceptable fallback, so
    this cannot block us.*
-4. **Error frames and bus state.** libicsneo has `Message::Type::CANError` and a
-   populated `HardwareCANErrorPacket` (error code, REC, TEC, error-warn,
-   error-passive, bus-off). `canRxReport` carries only a single `error` bit, so
-   REC/TEC/bus-off may need an MCP2518FD register read — `C1TREC` has all of it.
-   *Phase 2.*
+4. **Error frames and bus state.** *Partly answered, and implemented.* FW2 emits no
+   error event of any kind: `i\c\o` is documented as streaming "received CAN frames
+   and errors", but the only error signal that reaches the host is a single bit in
+   the WILI header of a `canRxReport`, and the OneWili event list contains no
+   `canError` text event. So `FW2Communication::busStateTask()` polls the
+   MCP2518FD's own `C1TREC` and `C1BDIAG1` through `i\c\r` every 500 ms and
+   dispatches a `CANErrorMessage` on change — TEC, REC, error-warn, error-passive,
+   bus-off and a per-phase error code. Polling follows `goOnline()`/`goOffline()`,
+   and an errored `canRxReport` triggers an immediate read.
+
+   This was written because its absence actively misled bring-up: with nothing
+   producing a `CANErrorMessage`, a controller in bus-off and an idle bus are
+   byte-for-byte identical from an application's point of view, and "no frames and
+   no errors" reads as a quiet bus when it may be a dead one.
+
+   **Confirmed on hardware: `i\c\r` is not implemented on current firmware.** With
+   the board otherwise healthy (`h\t` answering normally), both
+   `i\c\r 0 0000001C 3` and `i\c\r 0 00000000 1` return a success frame with no
+   register words — `[i\c\r <id> <seq> Ok 1]`. Addressing matches the vendored
+   client's own formatting, so this is not a call-site error. The poller therefore
+   disables itself after one such answer and reports `NotSupported` once, rather
+   than retrying forever or reporting zeroes as though they were readings.
+
+   Bus state consequently needs a firmware-side event, and that is a question for
+   the FreeWili team. Until then `CANErrorMessage` is implemented and correct but
+   never fires on this firmware, and the bench tools say "bus state unknown" rather
+   than implying health.
+
+5. **Why does nothing arrive, and nothing leave?** *Open — the live question.* With
+   zone 15 confirmed on, rate 500000 set, termination on and `i\c\o 0 1`
+   acknowledged, a 10 s capture of *both* ports simultaneously showed: zero
+   `canRxReport` WILI frames on the FTDI port, zero `can0` text events, and — the
+   significant one — **zero `canTx0` echoes for 20 transmits that each returned
+   `Ok`**. The TX echo is the controller's own report that a frame reached the
+   wire. Its absence means this is not merely a receive-path problem.
+
+   A related and unresolved worry: several commands acknowledge without doing
+   anything. Settings *reads* (`h\s\p\a`, `h\s\p\b`, `h\s\p\c`, `h\s\p\e`,
+   `h\s\p\f`, `h\s\p\g`) return no response frame at all, while `h\s\p\y` and
+   `h\s\p\1` return a bare `Ok` with no value, and `i\c\r` acknowledges empty.
+   **Until it is established what a bare `Ok` actually guarantees, no "success"
+   from this command surface should be treated as evidence** — including the
+   acceptance counts `Device::transmit()` produces. The next bench step is to send
+   deliberately invalid commands and see whether those are acknowledged too.
 
 **Worth asking the FreeWili team early**, since the answers are free and shape Phase
 0's scope: does `ow_io_canfd_*` already sequence the PCAL6416A muxes and `IOCON`? Is

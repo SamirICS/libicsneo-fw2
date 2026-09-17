@@ -24,9 +24,16 @@
  *
  *   Heartbeat  Device's heartbeat thread sends Command::RequestStatusUpdate
  *        every 110 ms and closes the device if nothing answers. sendCommand()
- *        answers it with a synthetic ResetStatusMessage backed by a real
- *        `i\g\u` (gpio_read_all) probe, so libicsneo's disconnect detection
- *        stays live and actually means something on FW2.
+ *        hands that to statusTask(), which answers with a synthetic
+ *        ResetStatusMessage backed by a real `h\t` probe, so libicsneo's
+ *        disconnect detection stays live and actually means something on FW2.
+ *        The handoff is not an optimisation -- see statusTask() for why
+ *        answering inline deadlocks.
+ *
+ *   Bus state  FW2 emits no error event of any kind, so busStateTask() polls
+ *        the controller's own C1TREC / C1BDIAG1 registers and dispatches
+ *        CANErrorMessages on change. See busStateTask() for why this is polled
+ *        rather than pushed.
  */
 
 #ifdef __cplusplus
@@ -80,6 +87,35 @@ public:
 		std::chrono::milliseconds timeout = std::chrono::milliseconds(500));
 
 	/**
+	 * Read `count` consecutive 32-bit CAN controller registers starting at
+	 * `address`, through OneWili's `i\c\r`.
+	 *
+	 * Addresses are MCP2518FD SFR offsets -- C1CON at 0x000, C1TREC at 0x01C --
+	 * and are formatted as the 8 hex digits the vendored client uses
+	 * (third-party/onewili/src/onewili.c, ow_io_canfd_read_can_registers).
+	 *
+	 * Public deliberately. These registers are the only window this port has onto
+	 * what the controller actually thinks is happening, so bring-up and bench
+	 * tools need them directly rather than through a message.
+	 *
+	 * Returns false if the command fails OR if it succeeds without returning
+	 * register data -- see busStateTask() for why that distinction matters.
+	 */
+	bool readCANRegisters(uint32_t address, size_t count, std::vector<uint32_t>& out,
+		std::chrono::milliseconds timeout = std::chrono::milliseconds(300));
+
+	/**
+	 * Start or stop polling CAN bus state.
+	 *
+	 * While enabled, TEC/REC and the error flags are read periodically and any
+	 * change is dispatched as a CANErrorMessage, which is what makes bus-off,
+	 * error-passive and a rising ACK-error count visible to an ordinary libicsneo
+	 * application. Driven by FreeWili2::enableNetworkCommunication(), so it
+	 * follows goOnline()/goOffline().
+	 */
+	void setBusStatePolling(bool enable);
+
+	/**
 	 * The OneWili CAN channel this device drives.
 	 *
 	 * The MVP advertises exactly one channel and the fatherboard carries one
@@ -131,8 +167,75 @@ private:
 	/** Parse whatever binary frames are buffered and dispatch them. */
 	void drainBinaryFrames();
 
+	/**
+	 * Answers Command::RequestStatusUpdate, off the requesting thread.
+	 *
+	 * This thread exists for correctness, not for speed. Device's heartbeat
+	 * calls sendCommand() while holding a mutex that its own message callback
+	 * takes (device.cpp: `recvLk` on `receivedMessageMutex`, taken before
+	 * sendCommand and released only inside the wait_for that follows). On an
+	 * ICS device that is safe because sendCommand() merely writes bytes and the
+	 * status arrives later on the read thread. If FW2 answers inline instead,
+	 * dispatchMessage() runs that callback on the heartbeat thread itself and
+	 * it self-deadlocks on a non-recursive mutex -- while holding
+	 * Communication::messageCallbacksLock, which then wedges every other
+	 * thread that touches the callback list. Observed on hardware: the run
+	 * survives the heartbeat but hangs forever in removeMessageCallback().
+	 *
+	 * So sendCommand() posts here and returns, matching the threading contract
+	 * upstream's own devices keep.
+	 */
+	std::thread statusThread;
+	void statusTask();
+	std::mutex statusMutex;
+	std::condition_variable statusCv;
+	// Deliberately a flag, not a count: requests that pile up while a probe is
+	// in flight coalesce into one. The heartbeat wants a recent answer, not one
+	// answer per ask.
+	bool statusRequested = false;
+
 	/** Send Device's heartbeat a synthetic status backed by a real liveness probe. */
 	bool answerStatusRequest();
+
+	/**
+	 * Polls CAN bus state and dispatches CANErrorMessages.
+	 *
+	 * FW2 has no spontaneous error event. `i\c\o` is documented as streaming
+	 * "received CAN frames and errors", but the only error signal that actually
+	 * reaches us is a single bit in the WILI frame header of a canRxReport --
+	 * which says one received frame was bad and says nothing about TEC, REC or
+	 * bus-off. OneWili exposes no `canError` text event either; the full event
+	 * list in third-party/onewili/include/onewili.h has none.
+	 *
+	 * So bus state has to be pulled out of the controller's own registers. That
+	 * is a polled round trip rather than a push, which is why this is its own
+	 * thread: it must not stall the RX path, the TX pipeline, or the heartbeat.
+	 *
+	 * Without this, a board sitting in bus-off is indistinguishable from an idle
+	 * bus -- both produce exactly nothing. That is not a hypothetical; it is what
+	 * made the "no frames received" bring-up problem hard to localise.
+	 */
+	std::thread busStateThread;
+	void busStateTask();
+	std::mutex busStateMutex;
+	std::condition_variable busStateCv;
+	bool busStatePolling = false;
+	// Set when something already suspects trouble -- an errored canRxReport --
+	// so the next poll happens immediately rather than up to a period later.
+	bool busStateDue = false;
+	/**
+	 * Cleared the first time `i\c\r` answers without register data.
+	 *
+	 * Measured on hardware: `i\c\r` returns a success frame carrying no body.
+	 * That may be firmware that does not implement the read, so rather than
+	 * burning a round trip every period forever, the poller reports once and
+	 * stops. Reporting "no bus state available" beats silently pretending the
+	 * bus is healthy.
+	 */
+	bool busStateSupported = true;
+	bool haveLastBusState = false;
+	uint32_t lastTREC = 0;
+	uint32_t lastBDIAG1 = 0;
 
 	// Opaque so the vendored C parser does not leak into every translation unit
 	// that includes this header.
