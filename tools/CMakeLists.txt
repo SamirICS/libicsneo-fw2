@@ -9,3 +9,6 @@ if(UNIX)
 	add_executable(fw2_tx fw2_tx.cpp)
 	target_link_libraries(fw2_tx icsneocpp)
 endif()
+
+# Qt6 desktop application. Self-skipping when Qt6 is not present.
+add_subdirectory(fw2_desktop)
