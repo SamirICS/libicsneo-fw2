@@ -205,6 +205,10 @@ if(LIBICSNEO_BUILD_EXAMPLES)
 	add_subdirectory(examples)
 endif()
 
+if(LIBICSNEO_ENABLE_ONEWILI)
+	add_subdirectory(tools)
+endif()
+
 # Extensions
 set(LIBICSNEO_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 foreach(EXT_PATH ${LIBICSNEO_EXTENSION_DIRS})

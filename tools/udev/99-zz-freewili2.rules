@@ -1,0 +1,23 @@
+# FreeWili 2 (FW2) device access.
+#
+# The FW2 presents two USB ports behind an internal hub that reports Intrepid's
+# vendor ID (093c:2059 "FREE-WILi2"):
+#
+#   093c:205a  "FW2 v07"  CDC ACM  -- text command port  -> /dev/ttyACM*
+#   0403:6014  "FW2"      FTDI     -- binary CAN RX port -> /dev/ttyUSB*
+#
+# Both need to be readable/writable by the console user. Group is plugdev
+# because the Intrepid rules already use it and desktop users are members;
+# switch to "users" or "dialout" if that suits your setup better.
+#
+# This file must sort AFTER 99-intrepid.rules and 99-intrepidcs.rules so its
+# permission grants win -- hence the "zz".
+
+# Text command port -- matched on the CDC ACM function's own VID/PID so we do
+# not touch the other ttyACM devices on the machine.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="093c", ATTRS{idProduct}=="205a", GROUP="plugdev", MODE="0666"
+
+# Binary CAN RX port. Matched by the FTDI VID/PID only -- never by an "FW2"
+# product substring, because that string belongs to the *text* port.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6014", GROUP="plugdev", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0403", ATTR{idProduct}=="6014", GROUP="plugdev", MODE="0666"
