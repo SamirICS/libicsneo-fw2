@@ -127,6 +127,80 @@ bool frameReportsSuccess(const std::string& line) {
 	return line[lastSpace + 1] == '1';
 }
 
+/**
+ * Parse a spontaneous "[*can0 ...]" / "[*can1 ...]" text event into a
+ * CANMessage. This is the RX path that actually carries traffic on hardware
+ * measured so far -- the binary canRxReport stream this port originally
+ * relied on has not been observed to fire at all, while these text events
+ * stream reliably the moment a real frame hits the bus.
+ *
+ * Observed wire shape: "[*can0 <ts_hex16> <seq_dec> <arbid_hex>[x] <data hex
+ * bytes...> <ok>]" -- the same generic <ts><seq>...<ok> envelope every OneWili
+ * line uses (frameReportsSuccess() above reads the same trailing <ok>).
+ * arbid's trailing 'x'/'X' marks an extended (29-bit) id, per the event's
+ * documented "hex arb id, 'x' suffix = extended" description.
+ */
+bool tryParseCanTextEvent(const std::string& line, std::shared_ptr<CANMessage>& out) {
+	if(line.size() < 4 || line.front() != '[' || line.back() != ']')
+		return false;
+
+	std::istringstream tokens(line.substr(1, line.size() - 2));
+	std::string idToken;
+	tokens >> idToken;
+	Network::NetID netId;
+	if(idToken == "*can0")
+		netId = Network::NetID::DWCAN_01;
+	else if(idToken == "*can1")
+		netId = Network::NetID::DWCAN_02;
+	else
+		return false;
+
+	std::vector<std::string> rest;
+	for(std::string tok; tokens >> tok;)
+		rest.push_back(tok);
+	// <ts> <seq> <arbid> <ok>, at minimum, for a zero-length data frame.
+	if(rest.size() < 4)
+		return false;
+	rest.pop_back(); // trailing <ok>
+
+	std::string arbToken = rest[2];
+	bool extended = false;
+	if(!arbToken.empty() && (arbToken.back() == 'x' || arbToken.back() == 'X')) {
+		extended = true;
+		arbToken.pop_back();
+	}
+
+	uint32_t arbid = 0;
+	try {
+		arbid = static_cast<uint32_t>(std::stoul(arbToken, nullptr, 16));
+	} catch(...) {
+		return false;
+	}
+
+	std::vector<uint8_t> data;
+	for(size_t i = 3; i < rest.size(); ++i) {
+		if(rest[i].size() != 2)
+			continue;
+		try {
+			data.push_back(static_cast<uint8_t>(std::stoul(rest[i], nullptr, 16)));
+		} catch(...) {
+			return false;
+		}
+	}
+
+	auto msg = std::make_shared<CANMessage>();
+	msg->network = netId;
+	msg->arbid = arbid;
+	msg->isExtended = extended;
+	msg->isCANFD = false; // can0/can1 text events are the classic-CAN path only
+	msg->data = std::move(data);
+	// No timestamp field on this path; 0 matches the convention the binary
+	// path uses for fields it cannot populate (see drainBinaryFrames()).
+	msg->timestamp = 0;
+	out = msg;
+	return true;
+}
+
 /*
  * MCP2518FD SFR offsets used for bus state. From the datasheet memory map; the
  * CAN SFR block starts at 0x000 in the controller's address space.
@@ -561,8 +635,16 @@ void FW2Communication::drainBinaryFrames() {
 void FW2Communication::drainTextResponses(OneWili& oneWili) {
 	std::string line;
 	while(oneWili.popTextResponse(line)) {
-		if(!isResponseFrame(line))
-			continue; // Spontaneous text event (can0, canTx0, ...); not an ack
+		if(!isResponseFrame(line)) {
+			// Spontaneous text event (can0, can1, canTx0, ...). can0/can1 are
+			// real CAN RX frames -- see tryParseCanTextEvent() for why this is
+			// the RX path that actually works. Everything else (canTx echoes,
+			// etc.) is not something this port consumes yet.
+			std::shared_ptr<CANMessage> msg;
+			if(tryParseCanTextEvent(line, msg))
+				dispatchMessage(msg);
+			continue;
+		}
 
 		{
 			std::scoped_lock<std::mutex> lk(syncMutex);
