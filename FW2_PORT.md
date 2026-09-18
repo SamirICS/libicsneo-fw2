@@ -13,17 +13,18 @@ FW2 enumerate side by side from one `icsneo::FindAllDevices()` call.
 |---|---|
 | Enumeration, `open()`, `close()`, heartbeat | ✅ working on hardware |
 | `goOnline()` / `goOffline()`, power-zone bring-up | ✅ working on hardware |
-| CAN transmit and receive | ⚠️ **not yet confirmed on the wire** — under investigation |
+| CAN transmit and receive | ✅ confirmed on the wire (validated against a ValueCAN 4-2) |
+| CAN FD | ✅ confirmed, all 16 DLC lengths |
+| Python bindings (`icsneopy`) | ✅ `DeviceType.FreeWili2` exposed and working end-to-end |
+| Qt6 desktop GUI (`fw2_desktop`) | ✅ builds and runs |
+| Windows | ✅ full driver: `Ports`-class device discovery + overlapped serial I/O |
 | Settings (`FW2Settings::refresh()` / `apply()`) | ⬜ not implemented |
-| CAN FD | ⬜ not implemented |
-| Windows | ⬜ stub only; Linux is the supported platform today |
 
-The transmit and receive paths are written and the library accepts frames, but no
-frame has yet been observed reaching or leaving the bus against a partner node. Treat
-"transmit succeeded" as "the firmware accepted the command", not as proof the frame
-was sent — this firmware provides no transmit echo. Likewise, bus state reads
-"unknown" rather than "healthy" because the controller registers cannot currently be
-read back.
+CAN RX arrives on this firmware as spontaneous **text events** (`can0`/`can1`) on the
+main OneWili text port, not as the documented binary `canRxReport` WILI frames on the
+FTDI port — `FW2Communication` parses those text events directly. An accept-all CAN
+filter and event host streaming (`h\a\e 1`) must both be enabled for RX to reach the
+host; `FreeWili2::enableNetworkCommunication()` does this automatically.
 
 Everything else in libicsneo is untouched and the upstream test suite passes.
 
