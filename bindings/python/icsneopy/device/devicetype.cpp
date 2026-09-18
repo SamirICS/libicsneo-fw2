@@ -72,6 +72,7 @@ void init_devicetype(pybind11::module_& m) {
 		.value("RADStar2", DeviceType::Enum::RADStar2)
 		.value("VividCAN", DeviceType::Enum::VividCAN)
 		.value("OBD2_SIM", DeviceType::Enum::OBD2_SIM)
+		.value("FreeWili2", DeviceType::Enum::FreeWili2)
 		.finalize();
 	deviceType.def(pybind11::init<DeviceType::Enum>());
 	deviceType.def("get_device_type", &DeviceType::getDeviceType);

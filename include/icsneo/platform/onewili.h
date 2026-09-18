@@ -49,6 +49,17 @@
 #include <cstdint>
 
 #ifdef _WIN32
+// Must precede <windows.h> or it drags in the legacy winsock.h, which
+// conflicts with <ws2tcpip.h> wherever this header and platform/socket.h
+// end up in the same translation unit (e.g. devicefinder.cpp).
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+// Otherwise windows.h's max()/min() macros break std::numeric_limits<T>::max()
+// wherever this header shares a translation unit with disk code (devicefinder.cpp).
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #endif
 
@@ -102,6 +113,8 @@ private:
 #ifdef _WIN32
 	HANDLE textHandle = INVALID_HANDLE_VALUE;
 	HANDLE binaryHandle = INVALID_HANDLE_VALUE;
+	OVERLAPPED readOverlapped = {};
+	OVERLAPPED writeOverlapped = {};
 #else
 	int textFd = -1;
 	int binaryFd = -1;

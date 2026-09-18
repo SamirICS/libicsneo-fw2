@@ -166,6 +166,22 @@ protected:
 		if(!fw2)
 			return false;
 
+		// The open() reset byte (0x02) puts the board in "quiet mode", which
+		// suppresses stream-class events at the host output -- canRxReport
+		// included, per OneWili's own doc comment for h\a\e ("same gate as
+		// control bytes 0x05 off / 0x06 on"). Protocol-level traffic (command
+		// acks, this very call) is unaffected, which is why TX and settings
+		// commands work fine while CAN RX silently produces nothing without
+		// this. Re-armed here rather than once in attemptToBeginCommunication()
+		// so it tracks the CAN stream's own on/off lifecycle.
+		{
+			std::string streamCommand = "h\\a\\e ";
+			streamCommand += enable ? "1" : "0";
+			std::string streamResponse;
+			if(!fw2->callOneWili(streamCommand, streamResponse, std::chrono::milliseconds(1000)))
+				return false;
+		}
+
 		// The transceiver has to be powered before the stream is worth starting.
 		// Only on the way up: dropping the rail on goOffline() would be a
 		// surprising side effect for a caller that just wants to stop receiving.
@@ -180,6 +196,21 @@ protected:
 		if(!fw2->callOneWili(command, response, std::chrono::milliseconds(1000)))
 			return false;
 
+		// The controller ACKs every frame on the bus at the hardware level
+		// regardless of filter state -- that is a property of the CAN protocol,
+		// not of this firmware -- but nothing reaches canRxReport / this driver's
+		// RX path unless at least one acceptance filter is configured. Without
+		// this, FW2's own transmits are seen (and ACKed) by every other node on
+		// the bus, while FW2 itself receives nothing, which looks exactly like a
+		// one-way wiring fault but is not one. Two filters, standard and
+		// extended, both wide open (mask 0 matches any ID).
+		if(enable) {
+			if(!setupAcceptAllFilter(fw2, 0, /*xtdId=*/0))
+				return false;
+			if(!setupAcceptAllFilter(fw2, 1, /*xtdId=*/1))
+				return false;
+		}
+
 		// Bus-state polling follows the stream. FW2 emits no error event, so
 		// without this an application sees silence from an idle bus and silence
 		// from a bus-off controller and cannot tell them apart. Started after the
@@ -190,6 +221,19 @@ protected:
 	}
 
 private:
+	/** Configure one wide-open (mask 0 = accept any ID) receive filter. See enableNetworkCommunication(). */
+	bool setupAcceptAllFilter(const std::shared_ptr<FW2Communication>& fw2, int index, int xtdId) {
+		std::string command = "i\\c\\f ";
+		command += std::to_string(static_cast<int>(CAN_CHANNEL));
+		command += ' ' + std::to_string(index);
+		command += " 1 ";
+		command += std::to_string(xtdId);
+		command += " 00000000 00000000 00000000 00000000 00000000 00000000";
+
+		std::string response;
+		return fw2->callOneWili(command, response, std::chrono::milliseconds(1000));
+	}
+
 	/**
 	 * Bring up the CAN power rail, zone 15 (5V_S15).
 	 *
