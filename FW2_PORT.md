@@ -51,6 +51,44 @@ build unconditionally fetches and compiles protobuf via `intrepidcs/icspb` (~10
 minutes), and `protoc` then fails unless its output directories are pre-created. Both
 are avoidable by pointing `FETCHCONTENT_SOURCE_DIR_ICSPB` at an existing build tree.
 
+### Windows quick start
+
+Prerequisites:
+
+- **Visual Studio Build Tools** (MSVC + `cl`/`msbuild` on `PATH`) — install the
+  "Desktop development with C++" workload if `cmake --build` can't find a compiler.
+- **CMake** 3.20+.
+- **Python 3.10+** for the `icsneopy` bindings.
+- **Qt 6.7+** (optional, only for the `fw2_desktop` GUI) — easiest via
+  `pip install aqtinstall` then
+  `aqt install-qt windows desktop 6.7.2 win64_msvc2019_64 -O C:\Qt`.
+
+Use a **short build directory** outside the repo (e.g. `C:\fw2b`), not a nested path
+like `libicsneo-fw2\build`. The protobuf dependency this project fetches has deeply
+nested source paths that exceed Windows' `MAX_PATH` if the build dir itself is long:
+
+```powershell
+cmake -S . -B C:\fw2b -DLIBICSNEO_ENABLE_ONEWILI=ON -DLIBICSNEO_ENABLE_BINDINGS_PYTHON=ON
+cmake --build C:\fw2b --config Release --target icsneocpp icsneopy fw2_smoke fw2_send fw2_desktop
+```
+
+(`fw2_desktop` is skipped automatically if Qt6 isn't found; drop it from `--target`
+if you didn't install Qt.)
+
+To use the Python bindings from any venv, run the helper in `python-scripts/`:
+
+```powershell
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+python python-scripts\install_icsneopy.py
+```
+
+This copies the built `icsneopy` extension module into the venv's `site-packages` so
+`import icsneopy` works from anywhere, without `sys.path` hacks. Re-run it after every
+rebuild of the `icsneopy` target. It looks for the build under `C:\fw2b` by default —
+pass a different `-B` path to `cmake` and edit `BUILD_DIRS` in the script if you used
+one.
+
 ## How it works
 
 libicsneo normally layers `Device` → `Communication` → `Packetizer` / `Encoder` /
