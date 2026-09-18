@@ -1,4 +1,15 @@
-# libicsneo
+# libicsneo (with FreeWili 2 support)
+
+This fork adds **FreeWili 2** as a native `icsneo::Device`, so it can send and
+receive CAN / CAN FD through the standard libicsneo C++ and Python APIs — no
+FreeWili-specific application code required.
+
+- **Start here:** [FW2_PORT.md](FW2_PORT.md) — what was added, status table, build
+  instructions.
+- **Python test scripts:** [python-scripts/](python-scripts/) — ready-to-run examples
+  for sending/receiving CAN and CAN FD frames, including a two-device loopback test.
+
+---
 
 libicsneo is the [Intrepid Control Systems](https://intrepidcs.com/) device
 communication library. Installation and usage documentation can be found within
