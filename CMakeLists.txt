@@ -64,6 +64,11 @@ option(LIBICSNEO_ENABLE_RAW_ETHERNET "Enable devices which communicate over raw 
 option(LIBICSNEO_ENABLE_CDCACM "Enable devices which communicate over USB CDC ACM" ON)
 option(LIBICSNEO_ENABLE_TCP "Enable devices which communicate over TCP" OFF)
 option(LIBICSNEO_ENABLE_DXX "Enable devices which communicate over D2XX/D3XX via libredxx" ON)
+# FreeWili 2. Unlike the options above this does not select a transport for ICS
+# firmware -- it adds a third-party device that speaks OneWili instead of the ICS
+# packet protocol. Turning it off removes the FW2 device, the OneWili driver and
+# the vendored OneWili library entirely, leaving an unmodified upstream build.
+option(LIBICSNEO_ENABLE_ONEWILI "Enable FreeWili 2 devices which communicate over OneWili" OFF)
 
 option(LIBICSNEO_ENABLE_BINDINGS_PYTHON "Enable Python library" OFF)
 
@@ -142,6 +147,18 @@ if(LIBICSNEO_BUILD_DOCS)
 	endif()
 endif()
 
+if(LIBICSNEO_ENABLE_ONEWILI AND NOT WIN32 AND ${CMAKE_SYSTEM_NAME} STREQUAL "Darwin")
+	# The OneWili driver needs per-platform USB enumeration and port pairing, and
+	# only the Linux (sysfs) and Windows (SetupAPI) ports exist. Unlike CDCACM
+	# there is no "use the Linux code and hope" fallback -- the Linux port reads
+	# /sys/bus/usb directly, which Darwin does not have.
+	message(WARNING
+		"There is no OneWili platform port for Darwin; disabling LIBICSNEO_ENABLE_ONEWILI.\n"
+		"FreeWili 2 devices will not be enumerated in this build."
+	)
+	set(LIBICSNEO_ENABLE_ONEWILI OFF)
+endif()
+
 if(WIN32)
 	set(PLATFORM_SRC
 		platform/windows/strings.cpp
@@ -158,6 +175,12 @@ if(WIN32)
 	if(LIBICSNEO_ENABLE_CDCACM)
 		list(APPEND PLATFORM_SRC
 			platform/windows/cdcacm.cpp
+		)
+	endif()
+
+	if(LIBICSNEO_ENABLE_ONEWILI)
+		list(APPEND PLATFORM_SRC
+			platform/windows/onewiliwindows.cpp
 		)
 	endif()
 else() # Darwin or Linux
@@ -196,6 +219,14 @@ else() # Darwin or Linux
 			endif()
 		endif()
 	endif()
+
+	if(LIBICSNEO_ENABLE_ONEWILI)
+		# Guarded to Linux above; Darwin never reaches here.
+		list(APPEND PLATFORM_SRC
+			platform/posix/onewili.cpp
+			platform/posix/linux/onewililinux.cpp
+		)
+	endif()
 endif()
 
 if(LIBICSNEO_ENABLE_DXX)
@@ -217,6 +248,15 @@ foreach(EXT_PATH ${LIBICSNEO_EXTENSION_DIRS})
 	message("Adding extension " ${EXT_DIR})
 	add_subdirectory(${EXT_PATH} ${CMAKE_CURRENT_BINARY_DIR}/${EXT_DIR})
 endforeach()
+
+# FreeWili 2. Not platform code -- the OneWili driver is what varies by platform,
+# this is the message-level translation that replaces Packetizer/Encoder/Decoder.
+set(ONEWILI_SRC)
+if(LIBICSNEO_ENABLE_ONEWILI)
+	list(APPEND ONEWILI_SRC
+		communication/fw2communication.cpp
+	)
+endif()
 
 set(SRC_FILES
 	communication/message/flexray/control/flexraycontrolmessage.cpp
@@ -304,6 +344,7 @@ set(SRC_FILES
 	disk/vsa/vsaparser.cpp
 	platform/servd.cpp
 	${PLATFORM_SRC}
+	${ONEWILI_SRC}
 )
 
 # Generate build info header
@@ -394,6 +435,17 @@ if(LIBICSNEO_ENABLE_TCP)
 	if(WIN32)
 		target_link_libraries(icsneocpp PRIVATE ws2_32 iphlpapi)
 	endif()
+endif()
+
+# onewili
+if(LIBICSNEO_ENABLE_ONEWILI)
+	target_compile_definitions(icsneocpp PRIVATE ICSNEO_ENABLE_ONEWILI)
+	add_subdirectory(third-party/onewili)
+	set_property(TARGET onewili PROPERTY POSITION_INDEPENDENT_CODE ON)
+	# PRIVATE: OneWili's headers are an implementation detail of the FW2 device.
+	# Nothing in include/icsneo/ exposes an ow_* type -- FW2Communication keeps the
+	# binary parser behind an opaque struct precisely so this stays true.
+	target_link_libraries(icsneocpp PRIVATE onewili)
 endif()
 
 # fatfs
@@ -547,6 +599,10 @@ add_subdirectory(bindings)
 
 if(LIBICSNEO_BUILD_EXAMPLES)
 	add_subdirectory(examples)
+endif()
+
+if(LIBICSNEO_ENABLE_ONEWILI)
+	add_subdirectory(tools)
 endif()
 
 # googletest

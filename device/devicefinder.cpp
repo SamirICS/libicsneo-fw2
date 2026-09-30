@@ -24,6 +24,10 @@
 #include "icsneo/platform/tcp.h"
 #endif
 
+#ifdef ICSNEO_ENABLE_ONEWILI
+#include "icsneo/platform/onewili.h"
+#endif
+
 using namespace icsneo;
 
 template<typename T>
@@ -73,6 +77,13 @@ std::vector<std::shared_ptr<Device>> DeviceFinder::FindAll() {
 		#ifdef ICSNEO_ENABLE_DXX
 		DXX::Find(newDriverFoundDevices);
 		#endif
+
+		#ifdef ICSNEO_ENABLE_ONEWILI
+		// Must run after CDCACM::Find(). FreeWili shares Intrepid's USB vendor ID
+		// (0x093c), so the two finders see each other's hardware; each filters the
+		// other out by product string rather than by VID.
+		OneWili::Find(newDriverFoundDevices);
+		#endif
 	}
 
 	// Weak because we don't want to keep devices open if they go out of scope elsewhere
@@ -115,6 +126,10 @@ std::vector<std::shared_ptr<Device>> DeviceFinder::FindAll() {
 	for (const FoundDevice& dev : newDriverFoundDevices) {
 		#ifdef __ETHERBADGE_H_
 		makeIfSerialMatches<EtherBADGE>(dev, newFoundDevices);
+		#endif
+
+		#ifdef __FREEWILI2_H_
+		makeIfSerialMatches<FreeWili2>(dev, newFoundDevices);
 		#endif
 
 		#ifdef __NEOOBD2PRO_H_
@@ -290,6 +305,10 @@ const std::vector<DeviceType>& DeviceFinder::GetSupportedDevices() {
 
 		#ifdef __ETHERBADGE_H_
 		EtherBADGE::DEVICE_TYPE,
+		#endif
+
+		#ifdef __FREEWILI2_H_
+		FreeWili2::DEVICE_TYPE,
 		#endif
 
 		#ifdef __NEOOBD2PRO_H_

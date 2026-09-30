@@ -2,6 +2,9 @@
 #define __DEVICES_POSIX_H_
 
 #include "icsneo/device/tree/etherbadge/etherbadge.h"
+#ifdef ICSNEO_ENABLE_ONEWILI
+#include "icsneo/device/tree/freewili2/freewili2.h"
+#endif
 #include "icsneo/device/tree/neoobd2pro/neoobd2pro.h"
 #include "icsneo/device/tree/neoobd2sim/neoobd2sim.h"
 #include "icsneo/device/tree/neoviconnect/neoviconnect.h"

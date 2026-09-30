@@ -16,3 +16,7 @@ examples/csharp/bin
 examples/csharp/obj
 test/system
 .env
+
+# Long-form FW2 working notes. FW2_PORT.md is the version that ships; this one
+# stays local.
+FW2_PORT_NOTES.md

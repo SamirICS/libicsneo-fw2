@@ -861,9 +861,9 @@ bool Device::transmit(std::shared_ptr<Frame> frame) {
 		packet = TransmitMessage::EncodeFromMessage(frame, *assignedClientId, report);
 		return packet.size() && com->sendCommand(ExtendedCommand::TransmitMessage, packet);
 	}
-	if(!com->encoder->encode(*com->packetizer, packet, frame))
-		return false;
-	return com->sendPacket(packet);
+	// Communication::sendMessage() does the ICS encode + sendPacket by default;
+	// FW2Communication overrides it to emit a OneWili command instead.
+	return com->sendMessage(frame);
 }
 
 bool Device::transmit(std::vector<std::shared_ptr<Frame>> frames) {

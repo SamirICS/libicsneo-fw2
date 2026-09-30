@@ -1,5 +1,8 @@
 #include "icsneo/platform/cdcacm.h"
 #include "icsneo/device/founddevice.h"
+#ifdef ICSNEO_ENABLE_ONEWILI
+#include "icsneo/platform/onewili.h"
+#endif
 #include <dirent.h>
 #include <cstring>
 #include <iostream>
@@ -161,6 +164,29 @@ void CDCACM::Find(std::vector<FoundDevice>& found) {
 			iter = foundttys.erase(iter); // Not the right VID, remove
 			continue;
 		}
+#ifdef ICSNEO_ENABLE_ONEWILI
+		/* FreeWili shares Intrepid's VID (0x093C), so an FW2's CDC command port
+		 * reaches this point looking like an ICS device. It is not one -- it
+		 * speaks OneWili, not the ICS packet protocol -- and OneWili::Find()
+		 * claims it instead. Leaving it here would enumerate the same board
+		 * twice, the second time with a driver that cannot talk to it.
+		 */
+		{
+			// Map "7-2:1.0" back to the USB device node that carries the strings.
+			const std::string& usbid = iter->first;
+			const auto colonpos = usbid.find(':');
+			std::string product;
+			if(colonpos != std::string::npos) {
+				std::ifstream productReader(
+					"/sys/bus/usb/devices/" + usbid.substr(0, colonpos) + "/product");
+				std::getline(productReader, product);
+			}
+			if(!product.empty() && OneWili::IsFreeWiliProduct(product)) {
+				iter = foundttys.erase(iter);
+				continue;
+			}
+		}
+#endif
 		ttyPid = pid; // Set the PID for this TTY
 		iter++; // If the loop ends without erasing the iter from the map, the item is good
 	}
