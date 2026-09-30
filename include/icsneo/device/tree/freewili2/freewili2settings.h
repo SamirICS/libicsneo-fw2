@@ -52,7 +52,7 @@ static_assert(sizeof(fw2_settings_t) == 24, "FreeWili 2 settings size mismatch")
  */
 class FW2Settings : public IDeviceSettings {
 public:
-	FW2Settings(std::shared_ptr<Communication> com) : IDeviceSettings(com, sizeof(fw2_settings_t)) {}
+	FW2Settings(Device* device) : IDeviceSettings(device, sizeof(fw2_settings_t)) {}
 
 	const CAN_SETTINGS* getCANSettingsFor(Network net) const override {
 		auto cfg = getStructurePointer<fw2_settings_t>();
