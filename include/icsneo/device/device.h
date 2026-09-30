@@ -151,6 +151,12 @@ public:
 		RADGigastar2 = 57,
 		SFPModule_ent11100 = 58,
 		RADGemini = 60,
+
+		// NOT an Intrepid allocation. Same reasoning as DeviceType::FreeWili2 --
+		// FreeWili 2 is third-party hardware supported by the libicsneo-fw2 fork,
+		// so it takes a value well clear of the sequential range ICS is filling
+		// (now at 60). Change it here if ICS ever assigns a real one.
+		FreeWili2 = 0xF2,
 	};
 
 	virtual ProductID getProductID() const = 0;
@@ -998,6 +1004,12 @@ protected:
 
 	virtual void setupExtensions() {}
 
+	// Moved up from private so that a device overriding goOnline()/goOffline()
+	// (FreeWili 2, whose bring-up is not ICS commands) can still run the
+	// extension hooks. addExtension() is public, so skipping them would be a
+	// latent bug rather than a no-op.
+	void forEachExtension(std::function<bool(const std::shared_ptr<DeviceExtension>&)> fn);
+
 	template<typename Extension>
 	std::shared_ptr<Extension> getExtension() const {
 		std::shared_ptr<Extension> ret;
@@ -1047,12 +1059,14 @@ private:
 
 	mutable std::mutex extensionsLock;
 	std::vector<std::shared_ptr<DeviceExtension>> extensions;
-	void forEachExtension(std::function<bool(const std::shared_ptr<DeviceExtension>&)> fn);
 
 	std::vector<Network> supportedTXNetworks;
 	std::vector<Network> supportedRXNetworks;
 	
-	APIEvent::Type attemptToBeginCommunication();
+	// Virtual so that devices which do not speak the ICS packet protocol (FreeWili 2)
+	// can substitute their own bring-up. Private is fine: overriding a private virtual
+	// is legal, and nothing outside Device should be calling this.
+	virtual APIEvent::Type attemptToBeginCommunication();
 
 	void handleNeoVIMessage(std::shared_ptr<CANMessage> message);
 
@@ -1182,7 +1196,8 @@ private:
 	 */
 	std::optional<uint64_t> getVSADiskSize();
 
-	bool enableNetworkCommunication(bool enable, uint32_t timeout = 0);
+	// Virtual for the same reason as attemptToBeginCommunication() above.
+	virtual bool enableNetworkCommunication(bool enable, uint32_t timeout = 0);
 
 	bool J2534_Transaction(const Network& network, J2534CommandMessage&& msg, const std::chrono::milliseconds& timeout);
 	bool J2534_ClearRxFilters(const Network& network);

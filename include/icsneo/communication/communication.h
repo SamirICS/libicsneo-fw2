@@ -51,6 +51,12 @@ public:
 	bool rawWrite(const std::vector<uint8_t>& bytes) { return driver->write(bytes); }
 	virtual bool sendPacket(std::vector<uint8_t>& bytes);
 
+	// Final step of Device::transmit(). The default encodes the frame into an ICS packet
+	// and hands it to sendPacket(). Devices whose wire format is not the ICS packet
+	// protocol (FreeWili 2) override this instead of Device::transmit(), so they keep
+	// transmit()'s isOpen/isOnline/isSupportedTXNetwork checks and its extension hooks.
+	virtual bool sendMessage(const std::shared_ptr<Frame>& frame);
+
 	void pauseReads();
 	void resumeReads();
 	bool readsArePaused();
